@@ -184,3 +184,6 @@ debug_tools
 
 database/*.db
 .omx/
+# Temporary backup files
+*.bak*
+.bak*
