@@ -166,22 +166,50 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     if not notes_res or not notes_res.get("has_more", False):
                         utils.logger.info("[XiaoHongShuCrawler.search] No more content!")
                         break
-                    semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
-                    task_list = [
-                        self.get_note_detail_async_task(
-                            note_id=post_item.get("id"),
-                            xsec_source=post_item.get("xsec_source"),
-                            xsec_token=post_item.get("xsec_token"),
-                            semaphore=semaphore,
-                        ) for post_item in notes_res.get("items", {}) if post_item.get("model_type") not in ("rec_query", "hot_query")
-                    ]
-                    note_details = await asyncio.gather(*task_list)
-                    for note_detail in note_details:
-                        if note_detail:
-                            await xhs_store.update_xhs_note(note_detail)
-                            await self.download_media(note_detail)
-                            note_ids.append(note_detail.get("note_id"))
-                            xsec_tokens.append(note_detail.get("xsec_token"))
+                    fast_search = os.getenv("XHS_FAST_SEARCH", "1") == "1"
+                    if fast_search:
+                        utils.logger.info("[XiaoHongShuCrawler.search] 快速搜索直采模式已启用：直接存储卡片数据，避免连续20次详情请求引发风控")
+                        for post_item in notes_res.get("items", []):
+                            if post_item.get("model_type") in ("rec_query", "hot_query"):
+                                continue
+                            card = post_item.get("note_card", {})
+                            if not card:
+                                continue
+                            interact_info = card.get("interact_info", {})
+                            user_info = card.get("user", {})
+                            note_id = post_item.get("id") or card.get("note_id")
+                            note_item = {
+                                "note_id": note_id,
+                                "xsec_token": post_item.get("xsec_token", ""),
+                                "type": card.get("type", "normal"),
+                                "title": card.get("display_title") or card.get("title", ""),
+                                "desc": card.get("desc", ""),
+                                "time": card.get("time", 0),
+                                "user": user_info,
+                                "interact_info": interact_info,
+                                "image_list": [{"url": card.get("cover", {}).get("url_default", "")}] if card.get("cover") else [],
+                                "tag_list": [],
+                            }
+                            await xhs_store.update_xhs_note(note_item)
+                            note_ids.append(note_id)
+                            xsec_tokens.append(post_item.get("xsec_token", ""))
+                    else:
+                        semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
+                        task_list = [
+                            self.get_note_detail_async_task(
+                                note_id=post_item.get("id"),
+                                xsec_source=post_item.get("xsec_source"),
+                                xsec_token=post_item.get("xsec_token"),
+                                semaphore=semaphore,
+                            ) for post_item in notes_res.get("items", {}) if post_item.get("model_type") not in ("rec_query", "hot_query")
+                        ]
+                        note_details = await asyncio.gather(*task_list)
+                        for note_detail in note_details:
+                            if note_detail:
+                                await xhs_store.update_xhs_note(note_detail)
+                                await self.download_media(note_detail)
+                                note_ids.append(note_detail.get("note_id"))
+                                xsec_tokens.append(note_detail.get("xsec_token"))
                     page += 1
                     utils.logger.info(f"[XiaoHongShuCrawler.search] Note details: {note_details}")
                     await self.batch_get_note_comments(note_ids, xsec_tokens)

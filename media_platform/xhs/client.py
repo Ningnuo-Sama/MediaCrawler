@@ -19,6 +19,7 @@
 
 import asyncio
 import json
+import os
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
 from urllib.parse import quote, urlencode
 
@@ -156,12 +157,33 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
             )
 
         if response.status_code == 471 or response.status_code == 461:
-            # someday someone maybe will bypass captcha
-            verify_type = response.headers["Verifytype"]
-            verify_uuid = response.headers["Verifyuuid"]
+            verify_type = response.headers.get("Verifytype", "")
+            verify_uuid = response.headers.get("Verifyuuid", "")
             msg = f"CAPTCHA appeared, request failed, Verifytype: {verify_type}, Verifyuuid: {verify_uuid}, Response: {response}"
             utils.logger.error(msg)
-            raise Exception(msg)
+
+            # 自动化验证码处理拦截
+            if self.playwright_page:
+                try:
+                    utils.logger.info("[XiaoHongShuClient.request] 检测到验证码挑战，正在尝试通过 Playwright 页面处理...")
+                    solved = await self.handle_captcha(verify_type, verify_uuid)
+                    if solved:
+                        utils.logger.info("[XiaoHongShuClient.request] 验证码已解决，更新 Cookie 并重试原请求...")
+                        if self.cookie_dict:
+                            self.headers["Cookie"] = "; ".join([f"{k}={v}" for k, v in self.cookie_dict.items()])
+                        async with make_async_client(proxy=self.proxy) as retry_client:
+                            response = await retry_client.request(method, url, timeout=self.timeout, **kwargs)
+                        if response.status_code not in (461, 471):
+                            utils.logger.info(f"[XiaoHongShuClient.request] 验证后重试成功，状态码: {response.status_code}")
+                        else:
+                            raise Exception(msg)
+                    else:
+                        raise Exception(msg)
+                except Exception as ex:
+                    utils.logger.error(f"[XiaoHongShuClient.request] 验证码自动处理失败: {ex}")
+                    raise Exception(msg)
+            else:
+                raise Exception(msg)
 
         response_data: Optional[Dict] = None
         try:
@@ -245,6 +267,75 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
             headers=headers,
             **kwargs,
         )
+
+    async def handle_captcha(self, verify_type: str, verify_uuid: str) -> bool:
+        """
+        处理小红书 461/471 验证码 (RedCaptcha / 滑块)
+        """
+        if not self.playwright_page:
+            utils.logger.warning("[XiaoHongShuClient.handle_captcha] 无可用的 playwright_page，跳过处理")
+            return False
+
+        captcha_url = f"https://www.xiaohongshu.com/website-login/captcha?verifyUuid={verify_uuid}&verifyType={verify_type}"
+        utils.logger.info(f"[XiaoHongShuClient.handle_captcha] 正在前台打开验证挑战页: {captcha_url}")
+
+        try:
+            # 1. 窗口置顶并打开挑战页
+            await self.playwright_page.bring_to_front()
+            await self.playwright_page.goto(captcha_url, wait_until="domcontentloaded", timeout=20000)
+            await asyncio.sleep(2)
+
+            # 2. 检查页面中是否包含滑块/拖动元素并尝试平滑拖拽
+            slider_selectors = [
+                ".captcha_slider",
+                ".red-captcha-slider",
+                ".slider",
+                "[role='slider']",
+                ".slide-btn",
+                "#captcha-slider",
+                ".secsdk-captcha-drag-icon",
+            ]
+            for selector in slider_selectors:
+                slider_elem = await self.playwright_page.query_selector(selector)
+                if slider_elem:
+                    box = await slider_elem.bounding_box()
+                    if box:
+                        utils.logger.info(f"[XiaoHongShuClient.handle_captcha] 检测到滑块元素 {selector}，尝试平滑拖拽")
+                        start_x = box["x"] + box["width"] / 2
+                        start_y = box["y"] + box["height"] / 2
+                        await self.playwright_page.mouse.move(start_x, start_y)
+                        await self.playwright_page.mouse.down()
+                        for step_x in range(10, 220, 15):
+                            await self.playwright_page.mouse.move(start_x + step_x, start_y + (step_x % 3 - 1))
+                            await asyncio.sleep(0.02)
+                        await self.playwright_page.mouse.up()
+                        break
+
+            # 3. 轮询等待验证完成
+            for _ in range(25):
+                await asyncio.sleep(1)
+                curr_url = self.playwright_page.url
+                content = await self.playwright_page.content()
+                if "验证成功" in content or "success" in content.lower() or "website-login/captcha" not in curr_url:
+                    utils.logger.info("[XiaoHongShuClient.handle_captcha] 验证通过！")
+                    cookies = await self.playwright_page.context.cookies()
+                    cookie_str, cookie_dict = utils.convert_cookies(cookies)
+                    self.cookie_dict.update(cookie_dict)
+                    self.headers["Cookie"] = cookie_str
+                    return True
+                if "xiaohongshu.com/explore" in curr_url or "xiaohongshu.com/discovery" in curr_url:
+                    utils.logger.info("[XiaoHongShuClient.handle_captcha] 页面已重定向至正常浏览页，验证通过")
+                    cookies = await self.playwright_page.context.cookies()
+                    cookie_str, cookie_dict = utils.convert_cookies(cookies)
+                    self.cookie_dict.update(cookie_dict)
+                    self.headers["Cookie"] = cookie_str
+                    return True
+
+            utils.logger.warning("[XiaoHongShuClient.handle_captcha] 验证等待超时")
+            return False
+        except Exception as e:
+            utils.logger.error(f"[XiaoHongShuClient.handle_captcha] 处理验证码发生异常: {e}")
+            return False
 
     async def query_self(self) -> Optional[Dict]:
         """
