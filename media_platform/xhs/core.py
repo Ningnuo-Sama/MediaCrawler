@@ -167,6 +167,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
                         utils.logger.info("[XiaoHongShuCrawler.search] No more content!")
                         break
                     fast_search = os.getenv("XHS_FAST_SEARCH", "1") == "1"
+                    note_details = []
                     if fast_search:
                         utils.logger.info("[XiaoHongShuCrawler.search] 快速搜索直采模式已启用：直接存储卡片数据，避免连续20次详情请求引发风控")
                         for post_item in notes_res.get("items", []):
@@ -178,21 +179,24 @@ class XiaoHongShuCrawler(AbstractCrawler):
                             interact_info = card.get("interact_info", {})
                             user_info = card.get("user", {})
                             note_id = post_item.get("id") or card.get("note_id")
+                            cover_info = card.get("cover") or {}
+                            cover_url = cover_info.get("url_default") or cover_info.get("url") or ""
                             note_item = {
                                 "note_id": note_id,
                                 "xsec_token": post_item.get("xsec_token", ""),
                                 "type": card.get("type", "normal"),
                                 "title": card.get("display_title") or card.get("title", ""),
-                                "desc": card.get("desc", ""),
-                                "time": card.get("time", 0),
+                                "desc": card.get("desc") or "",
+                                "time": card.get("time") or 0,
                                 "user": user_info,
                                 "interact_info": interact_info,
-                                "image_list": [{"url": card.get("cover", {}).get("url_default", "")}] if card.get("cover") else [],
+                                "image_list": [{"url": str(cover_url)}] if cover_url else [],
                                 "tag_list": [],
                             }
                             await xhs_store.update_xhs_note(note_item)
                             note_ids.append(note_id)
                             xsec_tokens.append(post_item.get("xsec_token", ""))
+                            note_details.append(note_item)
                     else:
                         semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
                         task_list = [
