@@ -19,6 +19,7 @@
 
 
 import os
+import re
 import asyncio
 import socket
 import httpx
@@ -30,7 +31,10 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 import config
 from tools.browser_launcher import BrowserLauncher
+from tools.httpx_util import make_async_client
 from tools import utils
+
+_WS_HOST_PATTERN = re.compile(r"^(ws://)(\[[^\]]*\]|[^/:]+)(:\d+)?(/.*)$")
 
 
 class CDPBrowserManager:
@@ -233,7 +237,7 @@ class CDPBrowserManager:
             # Simple socket connection test
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(5)
-                result = s.connect_ex(("localhost", debug_port))
+                result = s.connect_ex(("127.0.0.1", debug_port))
                 if result == 0:
                     utils.logger.info(
                         f"[CDPBrowserManager] CDP port {debug_port} is accessible"
@@ -286,19 +290,38 @@ class CDPBrowserManager:
                 "[CDPBrowserManager] CDP connection test failed, but will continue to try connecting"
             )
 
+    @staticmethod
+    def _normalize_ws_url(ws_url: str, debug_port: int) -> str:
+        """Rewrite any loopback host (including ``[::1]``) to ``127.0.0.1``."""
+        match = _WS_HOST_PATTERN.match(ws_url)
+        if not match:
+            return ws_url
+        scheme, host, port, path = match.groups()
+        if host.strip("[]").lower() not in ("localhost", "127.0.0.1", "::1"):
+            return ws_url
+        return f"{scheme}127.0.0.1{port or f':{debug_port}'}{path}"
+
     async def _get_browser_websocket_url(self, debug_port: int) -> str:
         """
-        Get browser WebSocket connection URL
+        Get browser WebSocket connection URL.
+
+        Two loopback traps are handled here:
+        1. ``trust_env`` — a proxy NO_PROXY entry such as ``[::1]`` makes httpx fail
+           while building the client ("Invalid port: ':1]'"), so this local request
+           goes through ``make_async_client`` (direct connection when no IP proxy).
+        2. ``localhost`` may resolve to ``::1``; Chrome then answers with
+           ``ws://[::1]:<port>/...``, which Playwright's connect_over_cdp rejects.
         """
         try:
-            async with httpx.AsyncClient() as client:
+            async with make_async_client() as client:
                 response = await client.get(
-                    f"http://localhost:{debug_port}/json/version", timeout=10
+                    f"http://127.0.0.1:{debug_port}/json/version", timeout=10
                 )
                 if response.status_code == 200:
                     data = response.json()
                     ws_url = data.get("webSocketDebuggerUrl")
                     if ws_url:
+                        ws_url = self._normalize_ws_url(ws_url, debug_port)
                         utils.logger.info(
                             f"[CDPBrowserManager] Got browser WebSocket URL: {ws_url}"
                         )
@@ -319,7 +342,7 @@ class CDPBrowserManager:
             if config.CDP_CONNECT_EXISTING:
                 # Existing browser remote debugging in Chrome 136+ does not expose
                 # /json/version. Connect directly and wait for user confirmation.
-                ws_url = f"ws://localhost:{self.debug_port}/devtools/browser"
+                ws_url = f"ws://127.0.0.1:{self.debug_port}/devtools/browser"
                 utils.logger.info(f"[CDPBrowserManager] Connecting to existing browser via CDP: {ws_url}")
                 utils.logger.info(
                     "[CDPBrowserManager] Please check your browser for a confirmation dialog and accept it"

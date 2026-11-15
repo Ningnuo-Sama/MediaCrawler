@@ -28,7 +28,7 @@ async def test_existing_browser_connects_directly_to_devtools_browser(monkeypatc
     await manager._connect_via_cdp(playwright)
 
     playwright.chromium.connect_over_cdp.assert_awaited_once_with(
-        "ws://localhost:9222/devtools/browser",
+        "ws://127.0.0.1:9222/devtools/browser",
         timeout=60000,
     )
 
@@ -57,7 +57,7 @@ async def test_existing_browser_falls_back_to_discovered_websocket_url(monkeypat
 
     manager._get_browser_websocket_url.assert_awaited_once_with(9222)
     assert playwright.chromium.connect_over_cdp.await_args_list[0].args == (
-        "ws://localhost:9222/devtools/browser",
+        "ws://127.0.0.1:9222/devtools/browser",
     )
     assert playwright.chromium.connect_over_cdp.await_args_list[0].kwargs == {
         "timeout": 60000,

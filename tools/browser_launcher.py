@@ -28,6 +28,7 @@ from typing import Optional, List, Tuple
 import asyncio
 from pathlib import Path
 
+import config
 from tools import utils
 
 
@@ -109,7 +110,7 @@ class BrowserLauncher:
         while port < start_port + 100:  # Try up to 100 ports
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.bind(('localhost', port))
+                    s.bind(('127.0.0.1', port))
                     return port
             except OSError:
                 port += 1
@@ -143,6 +144,16 @@ class BrowserLauncher:
             "--exclude-switches=enable-automation",  # Exclude automation switch
             "--disable-infobars",  # Disable info bars
         ]
+
+        # Proxy handling: prevent leaking domestic crawler traffic to airport/system proxy
+        if getattr(config, "ENABLE_IP_PROXY", False):
+            static_proxy = getattr(config, "STATIC_PROXY_URL", "")
+            if static_proxy:
+                args.append(f"--proxy-server={static_proxy}")
+                utils.logger.info(f"[BrowserLauncher] Using configured proxy: {static_proxy}")
+        else:
+            args.append("--no-proxy-server")
+            utils.logger.info("[BrowserLauncher] ENABLE_IP_PROXY is False. Forcing direct connection (--no-proxy-server).")
 
         # Headless mode
         if headless:
@@ -199,7 +210,7 @@ class BrowserLauncher:
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.settimeout(1)
-                    result = s.connect_ex(('localhost', debug_port))
+                    result = s.connect_ex(('127.0.0.1', debug_port))
                     if result == 0:
                         utils.logger.info(f"[BrowserLauncher] Browser is ready on port {debug_port}")
                         return True
